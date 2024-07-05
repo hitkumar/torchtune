@@ -142,7 +142,7 @@ class InferenceRecipe:
         if self._quantization_mode is not None:
             logger.info("Starting compilation to improve generation performance ...")
             custom_generate_next_token = torch.compile(
-                utils.generate_next_token, mode="max-autotune", fullgraph=True
+                utils.generate_next_token, mode="max-autotune-no-cudagraphs", fullgraph=True
             )
             t0 = time.perf_counter()
             _ = utils.generate(

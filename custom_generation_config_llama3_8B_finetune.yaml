@@ -1,0 +1,44 @@
+# Config for running the InferenceRecipe in generate.py to generate output from an LLM
+#
+# To launch, run the following command from root torchtune directory:
+#    tune run generate --config generation
+
+# Model arguments
+model:
+  _component_: torchtune.models.llama3.llama3_8b
+
+checkpointer:
+  _component_: torchtune.utils.FullModelTorchTuneCheckpointer
+  # _component_: torchtune.utils.FullModelMetaCheckpointer
+  checkpoint_dir: /tmp/Meta-Llama-3-8B-Instruct
+  checkpoint_files: [
+    # meta_model_0.pt
+    meta_model_0-4w.pt
+  ]
+  output_dir: /tmp/Meta-Llama-3-8B-Instruct
+  model_type: LLAMA3
+
+# Tokenizer
+tokenizer:
+  _component_: torchtune.models.llama3.llama3_tokenizer
+  path: /tmp/Meta-Llama-3-8B-Instruct/original/tokenizer.model
+
+# Environment
+device: cuda
+dtype: bf16
+seed: 1234 # It is not recommended to change this seed, b/c it matches EleutherAI's default seed
+
+# Generation arguments; defaults taken from gpt-fast
+prompt: "Hello, my name is"
+instruct_template: null
+chat_format: null
+max_new_tokens: 300
+temperature: 0.6 # 0.8 and 0.6 are popular values to try
+top_k: 300
+
+# quantizer: null
+quantizer:
+  _component_: torchtune.utils.quantization.Int4WeightOnlyQuantizer
+  groupsize: 256
+
+# With quantization, we get 47.49 tokens/sec, without quantization we get 17.21 tokens/sec ~3x speedup.
