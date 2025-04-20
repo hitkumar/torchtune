@@ -365,3 +365,10 @@ If you find the torchtune library useful, please cite it in your work as below.
 ## License
 
 torchtune is released under the [BSD 3 license](./LICENSE). However you may have other legal obligations that govern your use of other content, such as the terms of service for third-party models.
+
+#### Local changes from hitkumar
+Llama 3.2 3B model stored in
+/tmp/Llama-3.2-3B-Instruct
+
+Llama 4 17B 16E instruct model stored in
+/tmp/Llama-4-Scout-17B-16E-Instruct
