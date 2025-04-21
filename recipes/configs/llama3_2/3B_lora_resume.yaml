@@ -41,13 +41,13 @@ checkpointer:
     model-00001-of-00002.safetensors,
     model-00002-of-00002.safetensors,
   ]
-  # adapter_checkpoint: epoch_0/adapter_model.pt
+  adapter_checkpoint: epoch_0/adapter_model.pt
   # should_load_recipe_state: False
   recipe_checkpoint: null
   output_dir: ${output_dir}
   model_type: LLAMA3_2
 
-resume_from_checkpoint: False # set to True to resume from latest checkpoint
+resume_from_checkpoint: True # set to True to resume from latest checkpoint
 save_adapter_weights_only: False
 
 # Dataset and Sampler

@@ -406,6 +406,9 @@ _ALL_RECIPES = [
             Config(name="llama3_2/1B_lora", file_path="llama3_2/1B_lora.yaml"),
             Config(name="llama3_2/3B_lora", file_path="llama3_2/3B_lora.yaml"),
             Config(
+                name="llama3_2/3B_lora_resume", file_path="llama3_2/3B_lora_resume.yaml"
+            ),
+            Config(
                 name="llama3_1/405B_qlora",
                 file_path="llama3_1/405B_qlora.yaml",
             ),
