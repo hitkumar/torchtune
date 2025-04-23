@@ -372,3 +372,7 @@ Llama 3.2 3B model stored in
 
 Llama 4 17B 16E instruct model stored in
 /tmp/Llama-4-Scout-17B-16E-Instruct
+
+Virtual envs to use
+- torchtune: for general development
+- vllm: For inference related to vllm.
