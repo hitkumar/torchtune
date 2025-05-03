@@ -12,7 +12,7 @@
 #
 # This config was only tested on 8xA100 machine and 16xH100 machines.
 
-output_dir: /tmp/torchtune/llama4_17Bx16E/full
+output_dir: /home/htkumar/tune_logs/llama4_17Bx16E/full
 
 # Modeling arguments
 model:
@@ -26,13 +26,13 @@ data_parallel_replicate_dim: 1
 
 tokenizer:
   _component_: torchtune.models.llama4.llama4_transform
-  path: /tmp/Llama-4-Scout-17B-16E-Instruct/tokenizer.model
+  path: /home/htkumar/models/Llama-4-Scout-17B-16E-Instruct/tokenizer.model
   max_seq_len: null
   max_num_tiles: 16
 
 checkpointer:
   _component_: torchtune.training.FullModelHFCheckpointer
-  checkpoint_dir: /tmp/Llama-4-Scout-17B-16E-Instruct
+  checkpoint_dir: /home/htkumar/models/Llama-4-Scout-17B-16E-Instruct
   checkpoint_files:
     filename_format: model-{}-of-{}.safetensors
     max_filename: "00050"

@@ -16,13 +16,13 @@ tensor_parallel_plan:
 
 tokenizer:
   _component_: torchtune.models.llama4.llama4_transform
-  path: /tmp/Llama-4-Scout-17B-16E-Instruct/tokenizer.model
+  path: /home/htkumar/models/Llama-4-Scout-17B-16E-Instruct/tokenizer.model
   max_seq_len: null
   max_num_tiles: 16
 
 checkpointer:
   _component_: torchtune.training.FullModelHFCheckpointer
-  checkpoint_dir: /tmp/Llama-4-Scout-17B-16E-Instruct # You can also point this to your finetuned model!
+  checkpoint_dir: /home/htkumar/models/Llama-4-Scout-17B-16E-Instruct # You can also point this to your finetuned model!
   checkpoint_files:
     filename_format: model-{}-of-{}.safetensors
     max_filename: "00050"
@@ -42,8 +42,8 @@ log_level: INFO
 prompt:
   system: You are a helpful assistant who responds like the author Shakespeare.
   user:
-    image: https://upload.wikimedia.org/wikipedia/commons/thumb/4/4c/Olive_baboon.jpg/330px-Olive_baboon.jpg
-    text: What is in this image?
+    image: https://upload.wikimedia.org/wikipedia/commons/f/fc/2014-11-30_Tsitsikamma_National_Park_Storms_River_Mouth_01_anagoria.JPG
+    text: What is in this image? Be detailed and don't hallucinate.
 max_new_tokens: 200
-temperature: 0.6 # 0.8 and 0.6 are popular values to try
+temperature: 0.8 # 0.8 and 0.6 are popular values to try
 top_k: 300
