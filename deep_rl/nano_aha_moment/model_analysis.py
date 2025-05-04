@@ -1,21 +1,30 @@
 import os
 from pathlib import Path
 
+import torch
+
 scratch = Path.home() / "scratch"
 os.environ["HF_HOME"] = str(scratch / "hf_home")
 
-from transformers import AutoTokenizer
+from transformers import AutoModelForCausalLM, AutoTokenizer
 
 CHECKPOINT_OR_NAME = "McGill-NLP/nano-aha-moment-3b"
-CHAT_MODEL_NAME = "Qwen/Qwen2.5-3B-Instruct"
-tokenizer = AutoTokenizer.from_pretrained(CHAT_MODEL_NAME)
+CHAT_MODEL_NAME = "Qwen/Qwen2.5-3B"
+tokenizer = AutoTokenizer.from_pretrained(
+    CHAT_MODEL_NAME, cache_dir=scratch / "hf_cache"
+)
 print(f"tokenizer len is {len(tokenizer)}")
+model = AutoModelForCausalLM.from_pretrained(
+    CHAT_MODEL_NAME,
+    torch_dtype=torch.bfloat16,
+    cache_dir=scratch / "hf_home",
+)
 
 import torch
 from vllm import LLM, SamplingParams
 
 inference_engine = LLM(
-    model=CHECKPOINT_OR_NAME,
+    model=CHAT_MODEL_NAME,
     gpu_memory_utilization=0.5,
     dtype=torch.bfloat16,
     swap_space=2,
@@ -23,7 +32,7 @@ inference_engine = LLM(
     max_model_len=2048,
     max_seq_len_to_capture=2048,
 )
-from prompt_utils import PROMPT_TEMPLATE, SYSTEM_MESSAGE
+from prompt_utils import DEFAULT_PROMPT_TEMPLATE, DEFAULT_SYSTEM_MESSAGE
 
 print(inference_engine)
 
@@ -32,11 +41,11 @@ def preprocess_countdown_example(example):
 
     numbers = example["nums"]
     target = example["target"]
-    prompt = PROMPT_TEMPLATE.format(numbers=numbers, target=target)
+    prompt = DEFAULT_PROMPT_TEMPLATE.format(numbers=numbers, target=target)
     print(f"prompt is {prompt}")
 
     chat_messages = [
-        {"role": "system", "content": SYSTEM_MESSAGE},
+        {"role": "system", "content": DEFAULT_SYSTEM_MESSAGE},
         {"role": "user", "content": prompt},
         {"role": "assistant", "content": "Let me think step by step\n<think>"},
     ]
