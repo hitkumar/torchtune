@@ -20,6 +20,7 @@ DATASET_NAME = "Jiayi-Pan/Countdown-Tasks-3to4"
 
 from prompt_utils import DEFAULT_PROMPT_TEMPLATE, DEFAULT_SYSTEM_MESSAGE
 from utils import (
+    compute_pg_loss,
     create_training_episodes,
     GENERATIONS_PER_SAMPLE,
     prepare_model_inputs,
@@ -79,12 +80,12 @@ def main():
         torch_dtype=torch.bfloat16,
         device_map=0,
     )
-    # reference_model = AutoModelForCausalLM.from_pretrained(
-    #     MODEL_NAME,
-    #     attn_implementation="flash_attention_2",
-    #     torch_dtype=torch.bfloat16,
-    #     device_map=0,
-    # )
+    reference_model = AutoModelForCausalLM.from_pretrained(
+        MODEL_NAME,
+        attn_implementation="flash_attention_2",
+        torch_dtype=torch.bfloat16,
+        device_map=0,
+    )
 
     policy_model.gradient_checkpointing_enable(
         gradient_checkpointing_kwargs={"use_reentrant": False}
@@ -103,10 +104,10 @@ def main():
     )
 
     # TODO: Add ability to resume from a checkpoint
-    num_samples = 2
+    num_samples = 4
     indices = np.random.choice(len(train_dataset), num_samples, replace=False)
     samples = train_dataset.select(indices)
-    print(f"Selected {num_samples} samples from the dataset")
+    # print(f"Selected {num_samples} samples from the dataset")
 
     outputs = inference_engine.generate(
         prompt_token_ids=samples["input_ids"],
@@ -117,15 +118,16 @@ def main():
             top_k=TOP_K,
             detokenize=False,
             stop_token_ids=[EOS_TOKEN_ID],
+            max_tokens=MAX_RESPONSE_TOKENS,
         ),
     )
     all_generations = [list(g.token_ids) for out in outputs for g in out.outputs]
     all_finish_reasons = [g.finish_reason for out in outputs for g in out.outputs]
     inference_engine.sleep(1)
 
-    print(
-        f"Generated {len(all_generations)} generations, one example is:{all_generations[0]}"
-    )
+    # print(
+    #     f"Generated {len(all_generations)} generations, one example is:{all_generations[0]}"
+    # )
     gc.collect()
     torch.cuda.empty_cache()
     time.sleep(1)
@@ -136,9 +138,29 @@ def main():
         all_generations=all_generations,
         all_finish_reasons=all_finish_reasons,
     )
-    print(f"Created {len(episodes)} episodes, one example is:{episodes}")
+    # print(f"Number of episodes generated: {len(episodes['all_query_token_ids'])}")
     model_inputs = prepare_model_inputs(training_episodes=episodes, device="cuda")
-    print(f"Created {len(model_inputs)} model inputs, one example is:{model_inputs}")
+    print(
+        f"""input_ids shape: {model_inputs['input_ids'].shape},
+        labels shape: {model_inputs['labels'].shape},
+        attention mask shape: {model_inputs['attention_mask'].shape},
+        advantages shape: {model_inputs['advantages'].shape}"""
+    )
+    # print(
+    #     f"sum of advantages is {model_inputs['advantages'].sum().item()}, number of non zero advantages is {model_inputs['advantages'].count_nonzero().item()}"
+    # )
+
+    policy_model.train()
+    reference_model.eval()
+    total_response_len = (model_inputs["labels"] != -100).sum().item()
+
+    loss, loss_metrics = compute_pg_loss(
+        policy_model=policy_model,
+        reference_model=reference_model,
+        input_batch=model_inputs,
+        total_response_len=total_response_len,
+    )
+    print(f"Loss is {loss}, loss metrics are {loss_metrics}")
 
 
 if __name__ == "__main__":

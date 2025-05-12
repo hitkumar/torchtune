@@ -13,7 +13,7 @@ def format_reward_func(completion: str) -> float:
         completion = "<think>" + completion
 
         if completion.endswith(EOS_TOKEN):
-            completion = completion[:-1]
+            completion = completion[: -len(EOS_TOKEN)]
 
         regex = r"^<think>([^<]*(?:<(?!/?think>)[^<]*)*)<\/think>\n<answer>([\s\S]*?)<\/answer>$"
         match = re.search(regex, completion, re.DOTALL)

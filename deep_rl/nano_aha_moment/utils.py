@@ -35,6 +35,7 @@ def compute_pg_loss(
     )
     diff = ref_model_logprobs - policy_model_logprobs
     kl_distance = torch.exp(diff) - diff - 1
+    # print(f"kl_distance is {kl_distance}")
     policy_loss = (
         -policy_model_logprobs * input_batch["advantages"][..., 1:]
     )  # [bsz, seq_len-1]
@@ -151,10 +152,13 @@ def create_training_episodes(
             clean_up_tokenization_spaces=False,
         )
         # len(GENERATIONS_PER_SAMPLE)
+        # for generation_str in response_strs:
+        #     print(f"generation_str is {generation_str}")
         rewards = [
             compute_reward(generation_str, sample)[0]
             for generation_str in response_strs
         ]
+        print(f"rewards is {rewards}")
         rewards = np.array(rewards)
         response_advantages = (rewards - np.mean(rewards)) / (rewards.std() + 1e-6)
         response_advantages = [
