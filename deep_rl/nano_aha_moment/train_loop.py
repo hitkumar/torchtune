@@ -1,4 +1,5 @@
 import gc
+import os
 import re
 import time
 from pathlib import Path
@@ -24,6 +25,7 @@ from utils import (
     dump_episodes,
     evaluate_on_test_set,
     GENERATIONS_PER_SAMPLE,
+    get_latest_ckpt,
     load_model_into_vllm,
     prepare_model_inputs,
     TEMPERATURE,
@@ -33,13 +35,20 @@ from utils import (
 MAX_RESPONSE_TOKENS = 1024
 TOP_P = 1.0  # disabled nuclear sampling
 TOP_K = -1  # no top_k
-NUM_ITERATIONS = 100
+NUM_ITERATIONS = 2
 EPISODES_PER_ITERATION = 64
 PER_DEVICE_BATCH_SIZE = 4
 LEARNING_RATE = 1e-6
+CONTINUE_TRAINING = False
 
 
-def preprocess_countdown_example(example: Dict[str, Any], tokenizer: AutoTokenizer):
+def create_prompt(
+    example: Dict[str, Any],
+    tokenizer: AutoTokenizer,
+):
+    """
+    Create a prompt for a given example.
+    """
     numbers: List[int] = example["nums"]
     target: int = example["target"]
     prompt = DEFAULT_PROMPT_TEMPLATE.format(numbers=numbers, target=target)
@@ -58,20 +67,26 @@ def preprocess_countdown_example(example: Dict[str, Any], tokenizer: AutoTokeniz
     )
     return {
         "input_ids": input_ids,
-        "prompt": prompt,
     }
 
 
 def main():
+
+    # Set the environment variables for HuggingFace
+    # This is done to ensure that the cache directory for HuggingFace is set to a specific location,
+    # preventing the storage from being overwhelmed with model files and other data.
+    SCRATCH = Path.home() / "scratch"
+    os.environ["HF_HOME"] = str(SCRATCH / "hf_home")
+    RUN_NAME = "r1-zero"
+    EXP_DIR = SCRATCH / RUN_NAME
+    EXP_DIR.mkdir(parents=True, exist_ok=True)
 
     tokenizer: AutoTokenizer = AutoTokenizer.from_pretrained(MODEL_CHAT_NAME)
     EOS_TOKEN_ID = AutoTokenizer.from_pretrained(MODEL_NAME).eos_token_id
     EOS_TOKEN = tokenizer.convert_ids_to_tokens(EOS_TOKEN_ID)
 
     dataset = load_dataset(DATASET_NAME, split="train")
-    dataset = dataset.map(
-        preprocess_countdown_example, num_proc=8, fn_kwargs={"tokenizer": tokenizer}
-    )
+    dataset = dataset.map(create_prompt, num_proc=8, fn_kwargs={"tokenizer": tokenizer})
     train_test_split = dataset.train_test_split(test_size=500, seed=42)
     train_dataset = train_test_split["train"]
     test_dataset = train_test_split["test"]
@@ -84,12 +99,14 @@ def main():
         MODEL_NAME,
         attn_implementation="flash_attention_2",
         torch_dtype=torch.bfloat16,
+        low_cpu_mem_usage=True,
         device_map=0,
     )
     reference_model = AutoModelForCausalLM.from_pretrained(
         MODEL_NAME,
         attn_implementation="flash_attention_2",
         torch_dtype=torch.bfloat16,
+        low_cpu_mem_usage=True,
         device_map=0,
     )
     for param in reference_model.parameters():
@@ -119,8 +136,33 @@ def main():
         enable_sleep_mode=True,
     )
 
-    # TODO: Add ability to resume from a checkpoint
     begin_iter = 0
+    if CONTINUE_TRAINING:
+        ckpt_dir, ckpt_iter = get_latest_ckpt(EXP_DIR / "checkpoints")
+        if ckpt_dir is not None:
+            print(f"Loading checkpoint from {ckpt_dir}")
+            begin_iter = ckpt_iter + 1
+            try:
+                policy_model = AutoModelForCausalLM.from_pretrained(
+                    ckpt_dir,
+                    attn_implementation="flash_attention_2",
+                    torch_dtype=torch.bfloat16,
+                    low_cpu_mem_usage=True,
+                    device_map=0,
+                )
+
+                # could also load the optimizer state
+                optimizer = torch.optim.AdamW(
+                    policy_model.parameters(),
+                    lr=LEARNING_RATE,
+                    betas=(0.9, 0.999),
+                    eps=1e-8,
+                    weight_decay=0.0,
+                )
+                load_model_into_vllm(policy_model, inference_engine)
+            except Exception as e:
+                print(f"Failed to load checkpoint: {e}")
+
     for iteration in trange(begin_iter, NUM_ITERATIONS):
 
         if iteration % 5 == 0:
@@ -233,6 +275,12 @@ def main():
 
         inference_engine.wake_up()
         load_model_into_vllm(policy_model, inference_engine)
+
+        if iteration % 50 == 0:
+            ckpt_save_dir = EXP_DIR / "checkpoints" / f"ckpt_{iteration}"
+            ckpt_save_dir.mkdir(parents=True, exist_ok=True)
+            policy_model.save_pretrained(str(ckpt_save_dir))
+            # Maybe save the optimizer state as well
 
 
 if __name__ == "__main__":

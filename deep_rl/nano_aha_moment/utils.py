@@ -1,7 +1,7 @@
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
@@ -280,3 +280,15 @@ def dump_episodes(
         )
         for data in data_list:
             f.write(json.dumps(data) + "\n")
+
+
+def get_latest_ckpt(ckpt_dir: Path) -> Tuple[Optional[Path], Optional[int]]:
+    """
+    Get the latest checkpoint from a directory.
+    """
+    checkpoints = list(ckpt_dir.glob("ckpt_*"))
+    if not checkpoints:
+        return None, None
+
+    latest_ckpt = max(checkpoints, key=lambda x: int(x.name.split("_")[1]))
+    return latest_ckpt, int(latest_ckpt.name.split("_")[1])

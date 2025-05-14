@@ -13,26 +13,3 @@ DEFAULT_PROMPT_TEMPLATE = (
     "Show your work in <think> </think> tags. And return the final equation and answer in "
     "<answer> </answer> tags, for example <answer>(1 + 2) / (3 * 5)</answer>."
 )
-
-
-def create_prompt(
-    example: Dict[str, Any],
-    tokenizer: AutoTokenizer,
-    system_message: str = DEFAULT_SYSTEM_MESSAGE,
-    prompt_message: str = DEFAULT_PROMPT_TEMPLATE,
-):
-    """
-    Create a prompt for a given example.
-    """
-    numbers: List[int] = example["nums"]
-    target: int = example["target"]
-    user_prompt = prompt_message.format(numbers=numbers, target=target)
-    chat_messages = [
-        {"role": "system", "content": system_message},
-        {"role": "user", "content": user_prompt},
-        {"role": "assistant", "content": "Let me think step by step\n<think>"},
-    ]
-    # Check if tokenize should be true here.
-    return tokenizer.apply_chat_template(
-        chat_messages, tokenize=False, continue_final_message=True
-    )
