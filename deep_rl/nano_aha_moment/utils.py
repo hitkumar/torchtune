@@ -1,11 +1,15 @@
+import json
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
 import numpy as np
 import torch
+from datasets import Dataset
 
 from reward_functions import compute_reward
 from transformers import AutoTokenizer, PreTrainedModel
+from vllm import LLM, SamplingParams
 
 # Hyperparameters
 GENERATIONS_PER_SAMPLE = 4
@@ -25,14 +29,16 @@ def compute_pg_loss(
     # inputs are dim [bsz, seq_len]
 
     # [bsz, seq_len-1]
-    with torch.no_grad():
-        ref_model_logprobs = compute_token_log_probs(
-            reference_model, input_batch, TEMPERATURE
+    with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+        with torch.no_grad():
+            ref_model_logprobs = compute_token_log_probs(
+                reference_model, input_batch, TEMPERATURE
+            )
+    with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+        policy_model_logprobs = compute_token_log_probs(
+            policy_model, input_batch, TEMPERATURE
         )
 
-    policy_model_logprobs = compute_token_log_probs(
-        policy_model, input_batch, TEMPERATURE
-    )
     diff = ref_model_logprobs - policy_model_logprobs
     kl_distance = torch.exp(diff) - diff - 1
     # print(f"kl_distance is {kl_distance}")
@@ -182,3 +188,95 @@ def create_training_episodes(
         "all_advantages": all_advantages,
     }
     return episodes, stats
+
+
+def load_model_into_vllm(model: PreTrainedModel, llm: LLM) -> None:
+    """
+    Load a HuggingFace model into a VLLM LLM.
+    """
+    llm.llm_engine.model_executor.driver_worker.model_runner.model.load_weights(
+        model.state_dict().items()
+    )
+
+
+def evaluate_on_test_set(
+    inference_engine: LLM,
+    test_dataset: Dataset,
+    tokenizer: AutoTokenizer,
+    eos_token: str,
+    eval_sampling_params: SamplingParams,
+) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    """
+    Evaluate the current policy model used by inference engine on the test set.
+    """
+    generations = inference_engine.generate(
+        prompt_token_ids=test_dataset["input_ids"], sampling_params=eval_sampling_params
+    )
+    metrics = {
+        "response_length": [],
+        "rewards": [],
+        "non_stop_rate": [],
+    }
+    all_query_tokens = []
+    all_response_tokens = []
+
+    # Assuming n=1 for generations here.
+    for i, sample in enumerate(test_dataset):
+        response_token_ids = generations[i].outputs[0].token_ids
+        finish_reasons = generations[i].outputs[0].finish_reason
+        response_str = tokenizer.decode(
+            response_token_ids,
+            skip_special_tokens=False,
+            clean_up_tokenization_spaces=False,
+        )
+        metrics["response_length"].append(len(response_token_ids))
+        all_query_tokens.append(sample["input_ids"])
+        all_response_tokens.append(response_token_ids)
+        metrics["rewards"].append(compute_reward(response_str, sample)[0])
+        metrics["non_stop_rate"].append(finish_reasons != "stop")
+
+    episodes = {
+        "all_query_token_ids": all_query_tokens,
+        "all_response_token_ids": all_response_tokens,
+    }
+    return episodes, metrics
+
+
+def dump_episodes(
+    episodes: Dict[str, Any],
+    episode_stats: Dict[str, Any],
+    exp_dir: Path,
+    tokenizer: AutoTokenizer,
+    iteration: int,
+):
+    query_texts = tokenizer.batch_decode(
+        episodes["all_query_token_ids"],
+        skip_special_tokens=False,
+        clean_up_tokenization_spaces=False,
+    )
+    response_texts = tokenizer.batch_decode(
+        episodes["all_response_token_ids"],
+        skip_special_tokens=False,
+        clean_up_tokenization_spaces=False,
+    )
+    episodes_dir = exp_dir / "episodes"
+    episodes_dir.mkdir(parents=True, exist_ok=True)
+    data_list = [
+        {
+            "query_text": query_texts[i],
+            "response_text": response_texts[i],
+            "response_length": episode_stats["response_length"][i],
+            "reward": episode_stats["rewards"][i],
+        }
+        for i in range(len(query_texts))
+    ]
+    reward_avg = np.mean(episode_stats["rewards"])
+    response_len_avg = np.mean(episode_stats["response_length"])
+
+    with open(episodes_dir / f"eps_{iteration}.jsonl", "w") as f:
+        f.write(
+            json.dumps({"reward_avg": reward_avg, "response_len_avg": response_len_avg})
+            + "\n"
+        )
+        for data in data_list:
+            f.write(json.dumps(data) + "\n")

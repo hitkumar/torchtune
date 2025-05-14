@@ -1,13 +1,12 @@
 import gc
 import re
 import time
-from typing import Any, Dict, List, Tuple, Union
+from pathlib import Path
+from typing import Any, Dict, List
 
-import deepspeed
 import numpy as np
 import torch
 from datasets import load_dataset
-from deepspeed import DeepSpeedEngine
 from tqdm import trange
 from transformers import AutoModelForCausalLM, AutoTokenizer, PreTrainedModel
 from vllm import LLM, SamplingParams
@@ -22,7 +21,10 @@ from prompt_utils import DEFAULT_PROMPT_TEMPLATE, DEFAULT_SYSTEM_MESSAGE
 from utils import (
     compute_pg_loss,
     create_training_episodes,
+    dump_episodes,
+    evaluate_on_test_set,
     GENERATIONS_PER_SAMPLE,
+    load_model_into_vllm,
     prepare_model_inputs,
     TEMPERATURE,
 )
@@ -31,6 +33,10 @@ from utils import (
 MAX_RESPONSE_TOKENS = 1024
 TOP_P = 1.0  # disabled nuclear sampling
 TOP_K = -1  # no top_k
+NUM_ITERATIONS = 100
+EPISODES_PER_ITERATION = 64
+PER_DEVICE_BATCH_SIZE = 4
+LEARNING_RATE = 1e-6
 
 
 def preprocess_countdown_example(example: Dict[str, Any], tokenizer: AutoTokenizer):
@@ -86,9 +92,19 @@ def main():
         torch_dtype=torch.bfloat16,
         device_map=0,
     )
+    for param in reference_model.parameters():
+        param.requires_grad = False
 
     policy_model.gradient_checkpointing_enable(
         gradient_checkpointing_kwargs={"use_reentrant": False}
+    )
+
+    optimizer = torch.optim.AdamW(
+        policy_model.parameters(),
+        lr=LEARNING_RATE,
+        betas=(0.9, 0.999),
+        eps=1e-8,
+        weight_decay=0.0,
     )
 
     inference_engine = LLM(
@@ -99,68 +115,124 @@ def main():
         swap_space=1,
         scheduling_policy="fcfs",
         dtype=torch.bfloat16,
-        max_model_len=2048,
+        max_model_len=MAX_RESPONSE_TOKENS,
         enable_sleep_mode=True,
     )
 
     # TODO: Add ability to resume from a checkpoint
-    num_samples = 4
-    indices = np.random.choice(len(train_dataset), num_samples, replace=False)
-    samples = train_dataset.select(indices)
-    # print(f"Selected {num_samples} samples from the dataset")
+    begin_iter = 0
+    for iteration in trange(begin_iter, NUM_ITERATIONS):
 
-    outputs = inference_engine.generate(
-        prompt_token_ids=samples["input_ids"],
-        sampling_params=SamplingParams(
-            n=GENERATIONS_PER_SAMPLE,
-            temperature=TEMPERATURE,
-            top_p=TOP_P,
-            top_k=TOP_K,
-            detokenize=False,
-            stop_token_ids=[EOS_TOKEN_ID],
-            max_tokens=MAX_RESPONSE_TOKENS,
-        ),
-    )
-    all_generations = [list(g.token_ids) for out in outputs for g in out.outputs]
-    all_finish_reasons = [g.finish_reason for out in outputs for g in out.outputs]
-    inference_engine.sleep(1)
+        if iteration % 5 == 0:
+            eval_episodes, eval_stats = evaluate_on_test_set(
+                inference_engine=inference_engine,
+                test_dataset=test_dataset,
+                tokenizer=tokenizer,
+                eos_token=EOS_TOKEN,
+                eval_sampling_params=SamplingParams(
+                    n=1,
+                    temperature=TEMPERATURE,
+                    top_p=TOP_P,
+                    top_k=TOP_K,
+                    detokenize=False,
+                    stop_token_ids=[EOS_TOKEN_ID],
+                    max_tokens=MAX_RESPONSE_TOKENS,
+                ),
+            )
+            dump_episodes(
+                episodes=eval_episodes,
+                episode_stats=eval_stats,
+                exp_dir=Path("/tmp"),
+                iteration=iteration,
+                tokenizer=tokenizer,
+            )
 
-    # print(
-    #     f"Generated {len(all_generations)} generations, one example is:{all_generations[0]}"
-    # )
-    gc.collect()
-    torch.cuda.empty_cache()
-    time.sleep(1)
+        num_samples = EPISODES_PER_ITERATION // GENERATIONS_PER_SAMPLE
+        indices = np.random.choice(len(train_dataset), num_samples, replace=False)
+        samples = train_dataset.select(indices)
 
-    episodes, episodes_stats = create_training_episodes(
-        tokenizer=tokenizer,
-        samples=samples,
-        all_generations=all_generations,
-        all_finish_reasons=all_finish_reasons,
-    )
-    # print(f"Number of episodes generated: {len(episodes['all_query_token_ids'])}")
-    model_inputs = prepare_model_inputs(training_episodes=episodes, device="cuda")
-    print(
-        f"""input_ids shape: {model_inputs['input_ids'].shape},
-        labels shape: {model_inputs['labels'].shape},
-        attention mask shape: {model_inputs['attention_mask'].shape},
-        advantages shape: {model_inputs['advantages'].shape}"""
-    )
-    # print(
-    #     f"sum of advantages is {model_inputs['advantages'].sum().item()}, number of non zero advantages is {model_inputs['advantages'].count_nonzero().item()}"
-    # )
+        # Generate generations from the current policy model
+        outputs = inference_engine.generate(
+            prompt_token_ids=samples["input_ids"],
+            sampling_params=SamplingParams(
+                n=GENERATIONS_PER_SAMPLE,
+                temperature=TEMPERATURE,
+                top_p=TOP_P,
+                top_k=TOP_K,
+                detokenize=False,
+                stop_token_ids=[EOS_TOKEN_ID],
+                max_tokens=MAX_RESPONSE_TOKENS,
+            ),
+        )
+        all_generations = [list(g.token_ids) for out in outputs for g in out.outputs]
+        all_finish_reasons = [g.finish_reason for out in outputs for g in out.outputs]
+        inference_engine.sleep(1)
 
-    policy_model.train()
-    reference_model.eval()
-    total_response_len = (model_inputs["labels"] != -100).sum().item()
+        # print(
+        #     f"Generated {len(all_generations)} generations, one example is:{all_generations[0]}"
+        # )
+        gc.collect()
+        torch.cuda.empty_cache()
+        time.sleep(1)
 
-    loss, loss_metrics = compute_pg_loss(
-        policy_model=policy_model,
-        reference_model=reference_model,
-        input_batch=model_inputs,
-        total_response_len=total_response_len,
-    )
-    print(f"Loss is {loss}, loss metrics are {loss_metrics}")
+        episodes, episodes_stats = create_training_episodes(
+            tokenizer=tokenizer,
+            samples=samples,
+            all_generations=all_generations,
+            all_finish_reasons=all_finish_reasons,
+        )
+
+        # print(f"Number of episodes generated: {len(episodes['all_query_token_ids'])}")
+        model_inputs = prepare_model_inputs(training_episodes=episodes, device="cuda")
+        # print(
+        #     f"""input_ids shape: {model_inputs['input_ids'].shape},
+        #     labels shape: {model_inputs['labels'].shape},
+        #     attention mask shape: {model_inputs['attention_mask'].shape},
+        #     advantages shape: {model_inputs['advantages'].shape}"""
+        # )
+        # print(
+        #     f"sum of advantages is {model_inputs['advantages'].sum().item()}, number of non zero advantages is {model_inputs['advantages'].count_nonzero().item()}"
+        # )
+
+        # Train the policy model
+
+        policy_model.train()
+        reference_model.eval()
+        total_response_len = (model_inputs["labels"] != -100).sum().item()
+        optimizer.zero_grad()
+        accumulated_loss = 0.0
+
+        for i in trange(
+            0, EPISODES_PER_ITERATION, PER_DEVICE_BATCH_SIZE, desc="Grad_acc"
+        ):
+            batch = {
+                k: v[i : i + PER_DEVICE_BATCH_SIZE] for k, v in model_inputs.items()
+            }
+            with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+                loss, loss_metrics = compute_pg_loss(
+                    policy_model=policy_model,
+                    reference_model=reference_model,
+                    input_batch=batch,
+                    total_response_len=total_response_len,
+                )
+                # print(f"loss is {loss}, loss metrics are {loss_metrics}")
+
+            loss.backward()
+            accumulated_loss += loss.item()
+            print(f"Accumulated loss at step {i} is {accumulated_loss}")
+            # Free memory
+            del loss, loss_metrics, batch
+            gc.collect()
+            torch.cuda.empty_cache()
+
+        # optimization step
+        # clip gradients
+        torch.nn.utils.clip_grad_norm_(policy_model.parameters(), 1.0)
+        optimizer.step()
+        optimizer.zero_grad()
+
+        inference_engine.wake_up()
+        load_model_into_vllm(policy_model, inference_engine)
 
 
 if __name__ == "__main__":
