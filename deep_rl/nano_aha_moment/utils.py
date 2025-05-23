@@ -1,5 +1,4 @@
 import json
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -11,17 +10,14 @@ from reward_functions import compute_reward
 from transformers import AutoTokenizer, PreTrainedModel
 from vllm import LLM, SamplingParams
 
-# Hyperparameters
-GENERATIONS_PER_SAMPLE = 4
-TEMPERATURE = 1.0
-KL_COEFFICIENT = 0.001
-
 
 def compute_pg_loss(
     policy_model: PreTrainedModel,
     reference_model: PreTrainedModel,
     input_batch: Dict[str, torch.tensor],
     total_response_len: int,
+    temperature: float,
+    kl_coefficient: float,
 ) -> Tuple[torch.tensor, Dict[str, float]]:
     """
     Compute the policy gradient loss for the policy model by combining PPO loss and KL penalty.
@@ -32,11 +28,11 @@ def compute_pg_loss(
     with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
         with torch.no_grad():
             ref_model_logprobs = compute_token_log_probs(
-                reference_model, input_batch, TEMPERATURE
+                reference_model, input_batch, temperature
             )
     with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
         policy_model_logprobs = compute_token_log_probs(
-            policy_model, input_batch, TEMPERATURE
+            policy_model, input_batch, temperature
         )
 
     diff = ref_model_logprobs - policy_model_logprobs
@@ -46,7 +42,7 @@ def compute_pg_loss(
         -policy_model_logprobs * input_batch["advantages"][..., 1:]
     )  # [bsz, seq_len-1]
     loss = (
-        policy_loss + KL_COEFFICIENT * kl_distance
+        policy_loss + kl_coefficient * kl_distance
     ).sum() / total_response_len  # scalar
 
     metrics = {
@@ -134,16 +130,17 @@ def create_training_episodes(
     samples: List[Dict[str, Any]],
     all_generations: List[List[int]],
     all_finish_reasons: List[str],
+    generations_per_sample: int,
 ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     """
     Create training episodes from samples and generations.
     """
 
     assert len(all_generations) == len(all_finish_reasons)
-    assert len(all_generations) == len(samples) * GENERATIONS_PER_SAMPLE
+    assert len(all_generations) == len(samples) * generations_per_sample
     groups = [
-        list(range(i, i + GENERATIONS_PER_SAMPLE))
-        for i in range(0, len(all_generations), GENERATIONS_PER_SAMPLE)
+        list(range(i, i + generations_per_sample))
+        for i in range(0, len(all_generations), generations_per_sample)
     ]
 
     all_query_token_ids, all_response_token_ids, all_advantages = [], [], []
@@ -174,7 +171,7 @@ def create_training_episodes(
             )
         ]
         all_advantages.extend(response_advantages)
-        all_query_token_ids.extend([sample["input_ids"]] * GENERATIONS_PER_SAMPLE)
+        all_query_token_ids.extend([sample["input_ids"]] * generations_per_sample)
         all_response_token_ids.extend(response_token_ids)
 
         stats["rewards"].extend(rewards.tolist())
@@ -203,7 +200,6 @@ def evaluate_on_test_set(
     inference_engine: LLM,
     test_dataset: Dataset,
     tokenizer: AutoTokenizer,
-    eos_token: str,
     eval_sampling_params: SamplingParams,
 ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     """
@@ -240,6 +236,16 @@ def evaluate_on_test_set(
         "all_response_token_ids": all_response_tokens,
     }
     return episodes, metrics
+
+
+def dump_training_metrics(
+    training_metrics: Dict[str, float],
+    iteration: int,
+    metrics_file: Path,
+):
+    with open(metrics_file, "a") as f:
+        training_metrics["iteration"] = iteration
+        f.write(json.dumps(training_metrics) + "\n")
 
 
 def dump_episodes(

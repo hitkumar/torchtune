@@ -1,3 +1,4 @@
+import argparse
 import gc
 import os
 import re
@@ -9,7 +10,7 @@ import numpy as np
 import torch
 from datasets import load_dataset
 from tqdm import trange
-from transformers import AutoModelForCausalLM, AutoTokenizer, PreTrainedModel
+from transformers import AutoModelForCausalLM, AutoTokenizer
 from vllm import LLM, SamplingParams
 
 MODEL_NAME = "Qwen/Qwen2.5-3B"
@@ -23,23 +24,25 @@ from utils import (
     compute_pg_loss,
     create_training_episodes,
     dump_episodes,
+    dump_training_metrics,
     evaluate_on_test_set,
-    GENERATIONS_PER_SAMPLE,
     get_latest_ckpt,
     load_model_into_vllm,
     prepare_model_inputs,
-    TEMPERATURE,
 )
 
-# Sampling params
+# Define all the constants
 MAX_RESPONSE_TOKENS = 1024
 TOP_P = 1.0  # disabled nuclear sampling
 TOP_K = -1  # no top_k
-NUM_ITERATIONS = 2
+NUM_ITERATIONS = 1000
 EPISODES_PER_ITERATION = 64
 PER_DEVICE_BATCH_SIZE = 4
 LEARNING_RATE = 1e-6
 CONTINUE_TRAINING = False
+GENERATIONS_PER_SAMPLE = 4
+TEMPERATURE = 1.0
+KL_COEFFICIENT = 0.001
 
 
 def create_prompt(
@@ -72,6 +75,31 @@ def create_prompt(
 
 def main():
 
+    # Parse command line arguments
+    parser = argparse.ArgumentParser(description="Train R1 model with PPO")
+    parser.add_argument(
+        "--kl_coefficient",
+        type=float,
+        default=KL_COEFFICIENT,
+        help="KL coefficient for GRPO",
+    )
+    parser.add_argument(
+        "--temperature",
+        type=float,
+        default=TEMPERATURE,
+        help="Temperature for sampling",
+    )
+    parser.add_argument(
+        "--model_name", type=str, default="Qwen/Qwen2.5-3B", help="Model name/path"
+    )
+    parser.add_argument(
+        "--learning_rate",
+        type=float,
+        default=LEARNING_RATE,
+        help="Learning rate for training",
+    )
+    args = parser.parse_args()
+
     # Set the environment variables for HuggingFace
     # This is done to ensure that the cache directory for HuggingFace is set to a specific location,
     # preventing the storage from being overwhelmed with model files and other data.
@@ -80,10 +108,12 @@ def main():
     RUN_NAME = "r1-zero"
     EXP_DIR = SCRATCH / RUN_NAME
     EXP_DIR.mkdir(parents=True, exist_ok=True)
+    metrics_dir = EXP_DIR / "train_metrics"
+    metrics_dir.mkdir(parents=True, exist_ok=True)
+    metrics_file = metrics_dir / "metrics.jsonl"
 
     tokenizer: AutoTokenizer = AutoTokenizer.from_pretrained(MODEL_CHAT_NAME)
     EOS_TOKEN_ID = AutoTokenizer.from_pretrained(MODEL_NAME).eos_token_id
-    EOS_TOKEN = tokenizer.convert_ids_to_tokens(EOS_TOKEN_ID)
 
     dataset = load_dataset(DATASET_NAME, split="train")
     dataset = dataset.map(create_prompt, num_proc=8, fn_kwargs={"tokenizer": tokenizer})
@@ -118,7 +148,7 @@ def main():
 
     optimizer = torch.optim.AdamW(
         policy_model.parameters(),
-        lr=LEARNING_RATE,
+        lr=args.learning_rate,
         betas=(0.9, 0.999),
         eps=1e-8,
         weight_decay=0.0,
@@ -132,7 +162,7 @@ def main():
         swap_space=1,
         scheduling_policy="fcfs",
         dtype=torch.bfloat16,
-        max_model_len=MAX_RESPONSE_TOKENS,
+        max_model_len=2048,
         enable_sleep_mode=True,
     )
 
@@ -164,16 +194,16 @@ def main():
                 print(f"Failed to load checkpoint: {e}")
 
     for iteration in trange(begin_iter, NUM_ITERATIONS):
+        metrics: Dict[str, List[float]] = {}
 
         if iteration % 5 == 0:
             eval_episodes, eval_stats = evaluate_on_test_set(
                 inference_engine=inference_engine,
                 test_dataset=test_dataset,
                 tokenizer=tokenizer,
-                eos_token=EOS_TOKEN,
                 eval_sampling_params=SamplingParams(
                     n=1,
-                    temperature=TEMPERATURE,
+                    temperature=args.temperature,
                     top_p=TOP_P,
                     top_k=TOP_K,
                     detokenize=False,
@@ -184,7 +214,7 @@ def main():
             dump_episodes(
                 episodes=eval_episodes,
                 episode_stats=eval_stats,
-                exp_dir=Path("/tmp"),
+                exp_dir=EXP_DIR,
                 iteration=iteration,
                 tokenizer=tokenizer,
             )
@@ -198,7 +228,7 @@ def main():
             prompt_token_ids=samples["input_ids"],
             sampling_params=SamplingParams(
                 n=GENERATIONS_PER_SAMPLE,
-                temperature=TEMPERATURE,
+                temperature=args.temperature,
                 top_p=TOP_P,
                 top_k=TOP_K,
                 detokenize=False,
@@ -215,14 +245,19 @@ def main():
         # )
         gc.collect()
         torch.cuda.empty_cache()
-        time.sleep(1)
+        time.sleep(1)  # pause brielfy to avoid memory to clear.
 
         episodes, episodes_stats = create_training_episodes(
             tokenizer=tokenizer,
             samples=samples,
             all_generations=all_generations,
             all_finish_reasons=all_finish_reasons,
+            generations_per_sample=GENERATIONS_PER_SAMPLE,
         )
+        for k, v in episodes_stats.items():
+            metrics.setdefault(k, []).extend(
+                v
+            )  # extend list of metrics as these will be aggregated later.
 
         # print(f"Number of episodes generated: {len(episodes['all_query_token_ids'])}")
         model_inputs = prepare_model_inputs(training_episodes=episodes, device="cuda")
@@ -240,9 +275,13 @@ def main():
 
         policy_model.train()
         reference_model.eval()
+        # total number of valid tokens in the batch.
         total_response_len = (model_inputs["labels"] != -100).sum().item()
         optimizer.zero_grad()
         accumulated_loss = 0.0
+        accumulated_policy_loss = 0.0
+        accumulated_kl_penalty = 0.0
+        accumulated_entropy = 0.0
 
         for i in trange(
             0, EPISODES_PER_ITERATION, PER_DEVICE_BATCH_SIZE, desc="Grad_acc"
@@ -256,12 +295,19 @@ def main():
                     reference_model=reference_model,
                     input_batch=batch,
                     total_response_len=total_response_len,
+                    temperature=args.temperature,
+                    kl_coefficient=args.kl_coefficient,
                 )
                 # print(f"loss is {loss}, loss metrics are {loss_metrics}")
 
+            # we are not scaling the loss here by grad_acc steps as we are dividing the loss by total_response_len in `compute_pg_loss`
             loss.backward()
             accumulated_loss += loss.item()
-            print(f"Accumulated loss at step {i} is {accumulated_loss}")
+            accumulated_policy_loss += loss_metrics["policy_loss"]
+            accumulated_kl_penalty += loss_metrics["kl_distance"]
+            accumulated_entropy += loss_metrics["entropy_policy"]
+
+            # print(f"Accumulated loss at step {i} is {accumulated_loss}")
             # Free memory
             del loss, loss_metrics, batch
             gc.collect()
@@ -275,8 +321,20 @@ def main():
 
         inference_engine.wake_up()
         load_model_into_vllm(policy_model, inference_engine)
+        train_metrics = {
+            "loss": accumulated_loss,
+            "policy_loss": accumulated_policy_loss,
+            "kl_penalty": accumulated_kl_penalty,
+            "entropy": accumulated_entropy,
+        }
+        for k, v in metrics.items():
+            train_metrics[k] = np.mean(v)
 
-        if iteration % 50 == 0:
+        train_metrics["learning_rate"] = optimizer.param_groups[0]["lr"]
+
+        dump_training_metrics(train_metrics, iteration, metrics_file)
+
+        if iteration % 100 == 0:
             ckpt_save_dir = EXP_DIR / "checkpoints" / f"ckpt_{iteration}"
             ckpt_save_dir.mkdir(parents=True, exist_ok=True)
             policy_model.save_pretrained(str(ckpt_save_dir))
