@@ -10,6 +10,46 @@ from reward_functions import compute_reward
 from transformers import AutoTokenizer, PreTrainedModel
 from vllm import LLM, SamplingParams
 
+DEFAULT_SYSTEM_MESSAGE = (
+    "You are a helpful assistant. You first think about the reasoning process in the mind "
+    "and then provides the user with the answer."
+)
+
+DEFAULT_PROMPT_TEMPLATE = (
+    "Using the numbers {numbers}, create an equation that equals {target}. "
+    "You can use basic arithmetic operations (+, -, *, /) and each number can only be used once. "
+    "Show your work in <think> </think> tags. And return the final equation and answer in "
+    "<answer> </answer> tags, for example <answer>(1 + 2) / (3 * 5)</answer>."
+)
+
+
+def create_prompt(
+    example: Dict[str, Any],
+    tokenizer: AutoTokenizer,
+):
+    """
+    Create a prompt for a given example.
+    """
+    numbers: List[int] = example["nums"]
+    target: int = example["target"]
+    prompt = DEFAULT_PROMPT_TEMPLATE.format(numbers=numbers, target=target)
+
+    chat_messages = [
+        {"role": "system", "content": DEFAULT_SYSTEM_MESSAGE},
+        {"role": "user", "content": prompt},
+        {"role": "assistant", "content": "Let me think step by step\n<think>"},
+    ]
+
+    input_ids = tokenizer.apply_chat_template(
+        chat_messages, tokenize=True, continue_final_message=True
+    )
+    prompt = tokenizer.decode(
+        input_ids, skip_special_tokens=False, clean_up_tokenization_spaces=False
+    )
+    return {
+        "input_ids": input_ids,
+    }
+
 
 def compute_pg_loss(
     policy_model: PreTrainedModel,

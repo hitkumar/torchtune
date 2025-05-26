@@ -11,17 +11,9 @@ import torch
 from datasets import load_dataset
 from tqdm import trange
 from transformers import AutoModelForCausalLM, AutoTokenizer
-from vllm import LLM, SamplingParams
-
-MODEL_NAME = "Qwen/Qwen2.5-3B"
-MODEL_CHAT_NAME = MODEL_NAME + "-Instruct"
-
-# Dataset configuration
-DATASET_NAME = "Jiayi-Pan/Countdown-Tasks-3to4"
-
-from prompt_utils import DEFAULT_PROMPT_TEMPLATE, DEFAULT_SYSTEM_MESSAGE
 from utils import (
     compute_pg_loss,
+    create_prompt,
     create_training_episodes,
     dump_episodes,
     dump_training_metrics,
@@ -30,6 +22,13 @@ from utils import (
     load_model_into_vllm,
     prepare_model_inputs,
 )
+from vllm import LLM, SamplingParams
+
+MODEL_NAME = "Qwen/Qwen2.5-3B"
+MODEL_CHAT_NAME = MODEL_NAME + "-Instruct"
+
+# Dataset configuration
+DATASET_NAME = "Jiayi-Pan/Countdown-Tasks-3to4"
 
 # Define all the constants
 MAX_RESPONSE_TOKENS = 1024
@@ -43,34 +42,6 @@ CONTINUE_TRAINING = False
 GENERATIONS_PER_SAMPLE = 4
 TEMPERATURE = 1.0
 KL_COEFFICIENT = 0.001
-
-
-def create_prompt(
-    example: Dict[str, Any],
-    tokenizer: AutoTokenizer,
-):
-    """
-    Create a prompt for a given example.
-    """
-    numbers: List[int] = example["nums"]
-    target: int = example["target"]
-    prompt = DEFAULT_PROMPT_TEMPLATE.format(numbers=numbers, target=target)
-
-    chat_messages = [
-        {"role": "system", "content": DEFAULT_SYSTEM_MESSAGE},
-        {"role": "user", "content": prompt},
-        {"role": "assistant", "content": "Let me think step by step\n<think>"},
-    ]
-
-    input_ids = tokenizer.apply_chat_template(
-        chat_messages, tokenize=True, continue_final_message=True
-    )
-    prompt = tokenizer.decode(
-        input_ids, skip_special_tokens=False, clean_up_tokenization_spaces=False
-    )
-    return {
-        "input_ids": input_ids,
-    }
 
 
 def main():
@@ -105,7 +76,7 @@ def main():
     # preventing the storage from being overwhelmed with model files and other data.
     SCRATCH = Path.home() / "scratch"
     os.environ["HF_HOME"] = str(SCRATCH / "hf_home")
-    RUN_NAME = "r1-zero"
+    RUN_NAME = "r1-zero-v2"
     EXP_DIR = SCRATCH / RUN_NAME
     EXP_DIR.mkdir(parents=True, exist_ok=True)
     metrics_dir = EXP_DIR / "train_metrics"
@@ -169,7 +140,7 @@ def main():
     begin_iter = 0
     if CONTINUE_TRAINING:
         ckpt_dir, ckpt_iter = get_latest_ckpt(EXP_DIR / "checkpoints")
-        if ckpt_dir is not None:
+        if ckpt_dir is not None and ckpt_iter is not None:
             print(f"Loading checkpoint from {ckpt_dir}")
             begin_iter = ckpt_iter + 1
             try:
@@ -181,14 +152,20 @@ def main():
                     device_map=0,
                 )
 
-                # could also load the optimizer state
+                # Initialize optimizer
                 optimizer = torch.optim.AdamW(
                     policy_model.parameters(),
-                    lr=LEARNING_RATE,
+                    lr=args.learning_rate,
                     betas=(0.9, 0.999),
                     eps=1e-8,
                     weight_decay=0.0,
                 )
+
+                # Load optimizer state if it exists
+                optimizer_state_path = Path(ckpt_dir) / "optimizer.pt"
+                if optimizer_state_path.exists():
+                    optimizer.load_state_dict(torch.load(str(optimizer_state_path)))
+                    print(f"Loaded optimizer state from {optimizer_state_path}")
                 load_model_into_vllm(policy_model, inference_engine)
             except Exception as e:
                 print(f"Failed to load checkpoint: {e}")
@@ -196,7 +173,7 @@ def main():
     for iteration in trange(begin_iter, NUM_ITERATIONS):
         metrics: Dict[str, List[float]] = {}
 
-        if iteration % 5 == 0:
+        if iteration % 100 == 0:
             eval_episodes, eval_stats = evaluate_on_test_set(
                 inference_engine=inference_engine,
                 test_dataset=test_dataset,
@@ -334,11 +311,12 @@ def main():
 
         dump_training_metrics(train_metrics, iteration, metrics_file)
 
-        if iteration % 100 == 0:
+        if iteration % 100 == 0 or iteration == NUM_ITERATIONS - 1:
             ckpt_save_dir = EXP_DIR / "checkpoints" / f"ckpt_{iteration}"
             ckpt_save_dir.mkdir(parents=True, exist_ok=True)
             policy_model.save_pretrained(str(ckpt_save_dir))
-            # Maybe save the optimizer state as well
+            # Save optimizer state
+            torch.save(optimizer.state_dict(), str(ckpt_save_dir / "optimizer.pt"))
 
 
 if __name__ == "__main__":

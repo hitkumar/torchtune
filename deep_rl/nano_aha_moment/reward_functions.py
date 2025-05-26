@@ -32,6 +32,7 @@ def format_reward_func(completion: str) -> float:
 
 def equation_reward_func(completion: str, nums: List[int], target: int) -> float:
     try:
+        completion = "<think>" + completion
         match = re.search(r"<answer>(.*?)<\/answer>", completion)
         if match is None:
             return 0.0
