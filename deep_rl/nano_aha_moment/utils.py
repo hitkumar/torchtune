@@ -64,23 +64,30 @@ def compute_pg_loss(
     """
     # inputs are dim [bsz, seq_len]
 
+    # Create labels mask to properly handle padding and non-response tokens
+    labels = input_batch["labels"]
+    labels_mask = (labels[..., 1:] != -100).float()  # [bsz, seq_len-1]
+
     # [bsz, seq_len-1]
-    with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-        with torch.no_grad():
-            ref_model_logprobs = compute_token_log_probs(
-                reference_model, input_batch, temperature
-            )
-    with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-        policy_model_logprobs = compute_token_log_probs(
-            policy_model, input_batch, temperature
+    with torch.no_grad():
+        ref_model_logprobs = compute_token_log_probs(
+            reference_model, input_batch, temperature
         )
+    policy_model_logprobs = compute_token_log_probs(
+        policy_model, input_batch, temperature
+    )
 
     diff = ref_model_logprobs - policy_model_logprobs
     kl_distance = torch.exp(diff) - diff - 1
-    # print(f"kl_distance is {kl_distance}")
+    # Apply mask to ensure padding doesn't contribute to KL distance
+    kl_distance = kl_distance * labels_mask
+
     policy_loss = (
         -policy_model_logprobs * input_batch["advantages"][..., 1:]
     )  # [bsz, seq_len-1]
+    # Apply mask to ensure padding doesn't contribute to policy loss
+    policy_loss = policy_loss * labels_mask
+
     loss = (
         policy_loss + kl_coefficient * kl_distance
     ).sum() / total_response_len  # scalar
@@ -103,12 +110,13 @@ def compute_token_log_probs(
     """
     Compute the log probabilities of the next token given the input sequence.
     """
-    model_output = model(
-        input_ids=inputs["input_ids"],
-        attention_mask=inputs["attention_mask"],
-        return_dict=True,
-        use_cache=False,
-    )
+    with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+        model_output = model(
+            input_ids=inputs["input_ids"],
+            attention_mask=inputs["attention_mask"],
+            return_dict=True,
+            use_cache=False,
+        )
     logits = model_output.logits.float() / temperature
     shift_logits = logits[..., :-1, :].contiguous()  # [bsz, seq_len-1, vocab_size]
     shift_labels = inputs["labels"][..., 1:].contiguous()  # [bsz, seq_len-1]
@@ -197,13 +205,13 @@ def create_training_episodes(
         # len(GENERATIONS_PER_SAMPLE)
         # for generation_str in response_strs:
         #     print(f"generation_str is {generation_str}")
-        rewards = [
-            compute_reward(generation_str, sample)[0]
-            for generation_str in response_strs
+        reward_and_metrics = [
+            compute_reward(generation_str, sample) for generation_str in response_strs
         ]
-        print(f"rewards is {rewards}")
+        rewards, reward_metrics = zip(*reward_and_metrics)
+        # print(f"rewards is {rewards}")
         rewards = np.array(rewards)
-        response_advantages = (rewards - np.mean(rewards)) / (rewards.std() + 1e-6)
+        response_advantages = (rewards - np.mean(rewards)) / (rewards.std() + 1e-4)
         response_advantages = [
             [advantage] * len(response_token_id)
             for advantage, response_token_id in zip(
@@ -217,6 +225,9 @@ def create_training_episodes(
         stats["rewards"].extend(rewards.tolist())
         stats["response_length"].extend([len(x) for x in all_response_token_ids])
         stats["non_stop_rate"].extend([fr != "stop" for fr in finish_reasons])
+        for m in reward_metrics:
+            for k, v in m.items():
+                stats.setdefault(k, []).append(v)
 
     # TODO: Should we make this a dataclass?
     episodes = {

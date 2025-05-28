@@ -1,10 +1,9 @@
 import argparse
 import gc
 import os
-import re
 import time
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Dict, List
 
 import numpy as np
 import torch
@@ -37,7 +36,7 @@ TOP_K = -1  # no top_k
 NUM_ITERATIONS = 1000
 EPISODES_PER_ITERATION = 64
 PER_DEVICE_BATCH_SIZE = 4
-LEARNING_RATE = 1e-6
+LEARNING_RATE = 1e-6 * 3
 CONTINUE_TRAINING = False
 GENERATIONS_PER_SAMPLE = 4
 TEMPERATURE = 1.0
@@ -173,16 +172,16 @@ def main():
     for iteration in trange(begin_iter, NUM_ITERATIONS):
         metrics: Dict[str, List[float]] = {}
 
-        if iteration % 100 == 0:
+        if iteration > 0 and iteration % 100 == 0:
             eval_episodes, eval_stats = evaluate_on_test_set(
                 inference_engine=inference_engine,
                 test_dataset=test_dataset,
                 tokenizer=tokenizer,
                 eval_sampling_params=SamplingParams(
                     n=1,
-                    temperature=args.temperature,
-                    top_p=TOP_P,
-                    top_k=TOP_K,
+                    temperature=0.3,
+                    # top_p=TOP_P,
+                    # top_k=TOP_K,
                     detokenize=False,
                     stop_token_ids=[EOS_TOKEN_ID],
                     max_tokens=MAX_RESPONSE_TOKENS,
@@ -238,15 +237,6 @@ def main():
 
         # print(f"Number of episodes generated: {len(episodes['all_query_token_ids'])}")
         model_inputs = prepare_model_inputs(training_episodes=episodes, device="cuda")
-        # print(
-        #     f"""input_ids shape: {model_inputs['input_ids'].shape},
-        #     labels shape: {model_inputs['labels'].shape},
-        #     attention mask shape: {model_inputs['attention_mask'].shape},
-        #     advantages shape: {model_inputs['advantages'].shape}"""
-        # )
-        # print(
-        #     f"sum of advantages is {model_inputs['advantages'].sum().item()}, number of non zero advantages is {model_inputs['advantages'].count_nonzero().item()}"
-        # )
 
         # Train the policy model
 
@@ -266,23 +256,35 @@ def main():
             batch = {
                 k: v[i : i + PER_DEVICE_BATCH_SIZE] for k, v in model_inputs.items()
             }
-            with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-                loss, loss_metrics = compute_pg_loss(
-                    policy_model=policy_model,
-                    reference_model=reference_model,
-                    input_batch=batch,
-                    total_response_len=total_response_len,
-                    temperature=args.temperature,
-                    kl_coefficient=args.kl_coefficient,
-                )
-                # print(f"loss is {loss}, loss metrics are {loss_metrics}")
+            loss, loss_metrics = compute_pg_loss(
+                policy_model=policy_model,
+                reference_model=reference_model,
+                input_batch=batch,
+                total_response_len=total_response_len,
+                temperature=args.temperature,
+                kl_coefficient=args.kl_coefficient,
+            )
+            # print(f"loss is {loss}, loss metrics are {loss_metrics}")
+            metrics.setdefault("loss", []).append(loss.item())
 
             # we are not scaling the loss here by grad_acc steps as we are dividing the loss by total_response_len in `compute_pg_loss`
             loss.backward()
             accumulated_loss += loss.item()
-            accumulated_policy_loss += loss_metrics["policy_loss"]
-            accumulated_kl_penalty += loss_metrics["kl_distance"]
-            accumulated_entropy += loss_metrics["entropy_policy"]
+            # accumulated_policy_loss += loss_metrics["policy_loss"]
+            # accumulated_kl_penalty += loss_metrics["kl_distance"]
+            # accumulated_entropy += loss_metrics["entropy_policy"]
+
+            # Calculate gradient norm without clipping
+            grad_norm = 0.0
+            for param in policy_model.parameters():
+                if param.grad is not None:
+                    grad_norm += param.grad.data.norm(2).item() ** 2
+            grad_norm = grad_norm**0.5
+            metrics.setdefault("grad_norm", []).append(grad_norm)
+            for k, v in loss_metrics.items():
+                metrics.setdefault(k, []).append(
+                    v.item() if isinstance(v, torch.Tensor) else v
+                )
 
             # print(f"Accumulated loss at step {i} is {accumulated_loss}")
             # Free memory
@@ -299,19 +301,21 @@ def main():
         inference_engine.wake_up()
         load_model_into_vllm(policy_model, inference_engine)
         train_metrics = {
-            "loss": accumulated_loss,
-            "policy_loss": accumulated_policy_loss,
-            "kl_penalty": accumulated_kl_penalty,
-            "entropy": accumulated_entropy,
+            "accumulated_loss": accumulated_loss,
+            # "policy_loss": accumulated_policy_loss,
+            # "kl_penalty": accumulated_kl_penalty,
+            # "entropy": accumulated_entropy,
         }
         for k, v in metrics.items():
-            train_metrics[k] = np.mean(v)
+            # print(f"Metric {k} has {len(v)} values, value is {v}")
+            if None not in v:
+                train_metrics[k] = np.mean(v)
 
         train_metrics["learning_rate"] = optimizer.param_groups[0]["lr"]
 
         dump_training_metrics(train_metrics, iteration, metrics_file)
 
-        if iteration % 100 == 0 or iteration == NUM_ITERATIONS - 1:
+        if iteration > 0 and (iteration % 100 == 0 or iteration == NUM_ITERATIONS - 1):
             ckpt_save_dir = EXP_DIR / "checkpoints" / f"ckpt_{iteration}"
             ckpt_save_dir.mkdir(parents=True, exist_ok=True)
             policy_model.save_pretrained(str(ckpt_save_dir))

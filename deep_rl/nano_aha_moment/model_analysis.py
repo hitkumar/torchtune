@@ -15,7 +15,12 @@ from train_loop import (
     TOP_K,
     TOP_P,
 )
-from utils import create_prompt, evaluate_on_test_set, load_model_into_vllm
+from utils import (
+    create_prompt,
+    dump_episodes,
+    evaluate_on_test_set,
+    load_model_into_vllm,
+)
 from vllm import LLM, SamplingParams
 
 scratch = Path.home() / "scratch"
@@ -59,6 +64,7 @@ def eval_testset(
     test_dataset,
     model_name,
     tokenizer,
+    output_dir,
 ):
     model = AutoModelForCausalLM.from_pretrained(
         model_name,
@@ -77,7 +83,7 @@ def eval_testset(
         enable_sleep_mode=True,
     )
     load_model_into_vllm(model, inference_engine)
-    _, eval_stats = evaluate_on_test_set(
+    episodes, eval_stats = evaluate_on_test_set(
         inference_engine=inference_engine,
         test_dataset=test_dataset,
         tokenizer=tokenizer,
@@ -93,6 +99,14 @@ def eval_testset(
     )
     reward_avg = np.mean(eval_stats["rewards"])
     response_len_avg = np.mean(eval_stats["response_length"])
+
+    dump_episodes(
+        episodes=episodes,
+        episode_stats=eval_stats,
+        exp_dir=output_dir,
+        iteration=-1,
+        tokenizer=tokenizer,
+    )
 
     return (reward_avg, response_len_avg)
 
@@ -113,7 +127,24 @@ if __name__ == "__main__":
     # (0.947, 163.402) for htkumar/nan_aha_moment_900
     # (1.608, 382.918) for McGill-NLP/nano-aha-moment-3b
     # ((0.146, 384.276) for Qwen-2.5
-    print(f"eval stats is {eval_testset(test_dataset, MODEL_NAME, tokenizer)}")
+
+    # ((1.43, 214.89)) for retrained r1-zero-v2
+    # eval output for this run is stored in `/home/htkumar/scratch/r1-zero-v2/eval/episodes`
+
+    SCRATCH = Path.home() / "scratch"
+    os.environ["HF_HOME"] = str(SCRATCH / "hf_home")
+    RUN_NAME = "r1-zero-v2"
+    EXP_DIR = SCRATCH / RUN_NAME
+    EXP_DIR.mkdir(parents=True, exist_ok=True)
+    eval_output_dir = EXP_DIR / "eval"
+    local_model_path = "/home/htkumar/scratch/r1-zero-v2/checkpoints/ckpt_999"
+
+    eval_output_baseline = SCRATCH / "McGill-NLP/eval"
+    eval_output_baseline.mkdir(parents=True, exist_ok=True)
+
+    print(
+        f"eval stats is {eval_testset(test_dataset, CHECKPOINT_OR_NAME, tokenizer, eval_output_dir)}"
+    )
 
 
 # Response from Qwen 2.5 instruct model.
