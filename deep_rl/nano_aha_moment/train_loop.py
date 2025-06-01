@@ -33,11 +33,11 @@ DATASET_NAME = "Jiayi-Pan/Countdown-Tasks-3to4"
 MAX_RESPONSE_TOKENS = 1024
 TOP_P = 1.0  # disabled nuclear sampling
 TOP_K = -1  # no top_k
-NUM_ITERATIONS = 1000
+NUM_ITERATIONS = 3000
 EPISODES_PER_ITERATION = 64
 PER_DEVICE_BATCH_SIZE = 4
-LEARNING_RATE = 1e-6 * 3
-CONTINUE_TRAINING = False
+LEARNING_RATE = 1e-6 * 1.5
+CONTINUE_TRAINING = True
 GENERATIONS_PER_SAMPLE = 4
 TEMPERATURE = 1.0
 KL_COEFFICIENT = 0.001
@@ -246,9 +246,6 @@ def main():
         total_response_len = (model_inputs["labels"] != -100).sum().item()
         optimizer.zero_grad()
         accumulated_loss = 0.0
-        accumulated_policy_loss = 0.0
-        accumulated_kl_penalty = 0.0
-        accumulated_entropy = 0.0
 
         for i in trange(
             0, EPISODES_PER_ITERATION, PER_DEVICE_BATCH_SIZE, desc="Grad_acc"

@@ -128,7 +128,8 @@ if __name__ == "__main__":
     # (1.608, 382.918) for McGill-NLP/nano-aha-moment-3b
     # ((0.146, 384.276) for Qwen-2.5
 
-    # ((1.43, 214.89)) for retrained r1-zero-v2
+    # ((1.43, 214.89)) for retrained r1-zero-v2 (ckpt 999)
+    # ((1.536, 292.25)) for retrained r1-zero-v2 (ckpt 1999)
     # eval output for this run is stored in `/home/htkumar/scratch/r1-zero-v2/eval/episodes`
 
     SCRATCH = Path.home() / "scratch"
@@ -136,14 +137,14 @@ if __name__ == "__main__":
     RUN_NAME = "r1-zero-v2"
     EXP_DIR = SCRATCH / RUN_NAME
     EXP_DIR.mkdir(parents=True, exist_ok=True)
-    eval_output_dir = EXP_DIR / "eval"
+    eval_output_dir = EXP_DIR / "eval" / "ckpt_999"
     local_model_path = "/home/htkumar/scratch/r1-zero-v2/checkpoints/ckpt_999"
 
     eval_output_baseline = SCRATCH / "McGill-NLP/eval"
     eval_output_baseline.mkdir(parents=True, exist_ok=True)
 
     print(
-        f"eval stats is {eval_testset(test_dataset, CHECKPOINT_OR_NAME, tokenizer, eval_output_dir)}"
+        f"eval stats is {eval_testset(test_dataset, local_model_path, tokenizer, eval_output_dir)}"
     )
 
 
