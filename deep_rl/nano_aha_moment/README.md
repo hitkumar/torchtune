@@ -7,6 +7,7 @@
 
 ## Analysis
 - Difference is likely because Nano_aha_moment uses deepspeed, while I use native PyTorch.
+- Added TRL based training, but will rely on verifiers for further exploration in this direction.
 
 ## Tests
 - Adding using AI assistance

@@ -130,6 +130,7 @@ if __name__ == "__main__":
 
     # ((1.43, 214.89)) for retrained r1-zero-v2 (ckpt 999)
     # ((1.536, 292.25)) for retrained r1-zero-v2 (ckpt 1999)
+    # ((1.585, 314.212)) for retrained r1-zero-v2 (ckpt 2999). Reducing LR might not have helped. More the response length, more the reward.
     # eval output for this run is stored in `/home/htkumar/scratch/r1-zero-v2/eval/episodes`
 
     SCRATCH = Path.home() / "scratch"
@@ -137,8 +138,9 @@ if __name__ == "__main__":
     RUN_NAME = "r1-zero-v2"
     EXP_DIR = SCRATCH / RUN_NAME
     EXP_DIR.mkdir(parents=True, exist_ok=True)
-    eval_output_dir = EXP_DIR / "eval" / "ckpt_999"
-    local_model_path = "/home/htkumar/scratch/r1-zero-v2/checkpoints/ckpt_999"
+    ckpt_dir = "ckpt_2200"
+    eval_output_dir = EXP_DIR / "eval" / ckpt_dir
+    local_model_path = f"/home/htkumar/scratch/r1-zero-v2/checkpoints/{ckpt_dir}"
 
     eval_output_baseline = SCRATCH / "McGill-NLP/eval"
     eval_output_baseline.mkdir(parents=True, exist_ok=True)
