@@ -1,43 +1,16 @@
 # Run using the following command:
 # accelerate launch --num_processes 8 --config_file deepspeed_zero3.yaml train_loop_trl.py --config training_args.yaml > /tmp/logs.txt 2>&1
-import argparse
-import gc
 import os
 import random
-import time
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any, Dict, List
 
-import numpy as np
-import torch
 from datasets import load_dataset
 from reward_functions import equation_reward_func, format_reward_func
-from tqdm import trange
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoTokenizer
 from transformers.trainer_utils import get_last_checkpoint
 from trl import get_peft_config, GRPOConfig, GRPOTrainer, ModelConfig, TrlParser
 from utils import DEFAULT_PROMPT_TEMPLATE, DEFAULT_SYSTEM_MESSAGE
-from vllm import LLM, SamplingParams
-
-MODEL_NAME = "Qwen/Qwen2.5-3B"
-MODEL_CHAT_NAME = MODEL_NAME + "-Instruct"
-
-# Dataset configuration
-DATASET_NAME = "Jiayi-Pan/Countdown-Tasks-3to4"
-
-# Define all the constants
-MAX_RESPONSE_TOKENS = 1024
-TOP_P = 1.0  # disabled nuclear sampling
-TOP_K = -1  # no top_k
-NUM_ITERATIONS = 3000
-EPISODES_PER_ITERATION = 64
-PER_DEVICE_BATCH_SIZE = 4
-LEARNING_RATE = 1e-6 * 1.5
-CONTINUE_TRAINING = True
-GENERATIONS_PER_SAMPLE = 4
-TEMPERATURE = 1.0
-KL_COEFFICIENT = 0.001
 
 
 def create_prompt(
@@ -119,23 +92,18 @@ def get_checkpoint(training_args: GRPOConfig):
 
 
 def main():
+    parser = TrlParser((ModelConfig, ScriptArguments, GRPOConfig))
+    model_args, script_args, training_args = parser.parse_args_and_config()
+    print(f"Training args: {training_args}")
 
-    # Set the environment variables for HuggingFace
-    # This is done to ensure that the cache directory for HuggingFace is set to a specific location,
-    # preventing the storage from being overwhelmed with model files and other data.
-    SCRATCH = Path.home() / "scratch"
-    os.environ["HF_HOME"] = str(SCRATCH / "hf_home")
-    RUN_NAME = "r1-zero-v2"
-    EXP_DIR = SCRATCH / RUN_NAME
-    EXP_DIR.mkdir(parents=True, exist_ok=True)
-    metrics_dir = EXP_DIR / "train_metrics"
-    metrics_dir.mkdir(parents=True, exist_ok=True)
-    metrics_file = metrics_dir / "metrics.jsonl"
+    # Set HF cache directory
+    os.environ["HF_HOME"] = os.path.join(os.path.expanduser("~"), "scratch", "hf_home")
 
-    tokenizer: AutoTokenizer = AutoTokenizer.from_pretrained(MODEL_CHAT_NAME)
-    EOS_TOKEN_ID = AutoTokenizer.from_pretrained(MODEL_NAME).eos_token_id
+    tokenizer = AutoTokenizer.from_pretrained(model_args.model_name_or_path)
 
-    dataset = load_dataset(DATASET_NAME, split="train")
+    dataset = load_dataset(
+        script_args.dataset_id_or_path, split=script_args.dataset_splits
+    )
     dataset = dataset.map(create_prompt, num_proc=8, fn_kwargs={"tokenizer": tokenizer})
     train_test_split = dataset.train_test_split(test_size=500, seed=42)
     train_dataset = train_test_split["train"]
@@ -143,10 +111,6 @@ def main():
     print(
         f"Train data size is {len(train_dataset)}, test data size is {len(test_dataset)}"
     )
-
-    parser = TrlParser((ModelConfig, ScriptArguments, GRPOConfig))
-    model_args, script_args, training_args = parser.parse_args_and_config()
-    print(f"Training args: {training_args}")
     trainer = GRPOTrainer(
         model=model_args.model_name_or_path,
         reward_funcs=[group_equation_reward_func, group_format_reward_func],
